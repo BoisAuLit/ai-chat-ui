@@ -6,7 +6,7 @@ import { useState } from "react";
 
 export default function ChatPage() {
   const [input, setInput] = useState("");
-  const { messages, sendMessage, status } = useChat({
+  const { messages, sendMessage, status, error, regenerate } = useChat({
     transport: new DefaultChatTransport({ api: "/api/chat" }),
   });
 
@@ -48,6 +48,22 @@ export default function ChatPage() {
         ))}
 
         {isLoading && <div className="text-xs text-zinc-500">…</div>}
+
+        {error && (
+          <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+            <div className="mb-1 font-medium">Request failed</div>
+            <div className="mb-2 whitespace-pre-wrap break-words font-mono text-xs opacity-80">
+              {error.message || String(error)}
+            </div>
+            <button
+              type="button"
+              onClick={() => regenerate()}
+              className="rounded-md border border-red-300 px-2 py-1 text-xs font-medium hover:bg-red-100 dark:border-red-800 dark:hover:bg-red-900/40"
+            >
+              Retry
+            </button>
+          </div>
+        )}
       </div>
 
       <form
