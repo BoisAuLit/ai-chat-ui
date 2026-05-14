@@ -91,11 +91,19 @@ export default function ChatPage() {
 
   return (
     <div className="mx-auto flex h-dvh w-full max-w-2xl flex-col p-4">
-      <header className="mb-3 border-b border-zinc-200 pb-3 dark:border-zinc-800">
-        <h1 className="text-lg font-semibold">ai-chat-ui</h1>
-        <p className="text-xs text-zinc-500">
-          {currentModel.label.split(" ")[0]} · streaming · Vercel AI SDK
-        </p>
+      <header className="mb-3 flex items-center justify-between border-b border-zinc-200 pb-3 dark:border-zinc-800">
+        <div>
+          <h1 className="text-lg font-semibold">ai-chat-ui</h1>
+          <p className="text-xs text-zinc-500">
+            {currentModel.label.split(" ")[0]} · streaming · Vercel AI SDK
+          </p>
+        </div>
+        <a
+          href="/rag"
+          className="text-xs text-zinc-500 underline-offset-2 hover:underline"
+        >
+          RAG →
+        </a>
       </header>
 
       <details className="mb-3 rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
