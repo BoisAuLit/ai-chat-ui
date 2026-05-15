@@ -13,6 +13,7 @@ export interface IndexedDoc {
 }
 
 const STORE = new Map<string, IndexedDoc>();
+let LATEST_HASH: string | null = null;
 
 export function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16);
@@ -20,6 +21,12 @@ export function hashText(text: string): string {
 
 export function putDoc(doc: IndexedDoc): void {
   STORE.set(doc.hash, doc);
+  LATEST_HASH = doc.hash;
+}
+
+export function getLatestDoc(): IndexedDoc | undefined {
+  if (!LATEST_HASH) return undefined;
+  return STORE.get(LATEST_HASH);
 }
 
 export function getDoc(hash: string): IndexedDoc | undefined {

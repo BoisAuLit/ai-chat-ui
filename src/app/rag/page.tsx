@@ -234,12 +234,10 @@ export default function RagPage() {
             Paste doc → index → ask → run LLM-as-judge eval. OpenAI embeddings · Claude generation.
           </p>
         </div>
-        <Link
-          href="/"
-          className="text-xs text-zinc-500 underline-offset-2 hover:underline"
-        >
-          ← Plain chat
-        </Link>
+        <nav className="flex gap-3 text-xs text-zinc-500">
+          <Link href="/" className="underline-offset-2 hover:underline">Chat</Link>
+          <Link href="/agent" className="underline-offset-2 hover:underline">Agent</Link>
+        </nav>
       </header>
 
       <details className="mb-3 rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40" open={!indexed}>

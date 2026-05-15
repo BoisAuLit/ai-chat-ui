@@ -98,12 +98,10 @@ export default function ChatPage() {
             {currentModel.label.split(" ")[0]} · streaming · Vercel AI SDK
           </p>
         </div>
-        <a
-          href="/rag"
-          className="text-xs text-zinc-500 underline-offset-2 hover:underline"
-        >
-          RAG →
-        </a>
+        <nav className="flex gap-3 text-xs text-zinc-500">
+          <a href="/rag" className="underline-offset-2 hover:underline">RAG</a>
+          <a href="/agent" className="underline-offset-2 hover:underline">Agent</a>
+        </nav>
       </header>
 
       <details className="mb-3 rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
