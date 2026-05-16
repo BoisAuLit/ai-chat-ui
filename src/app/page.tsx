@@ -1,10 +1,14 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
-import { useState } from "react";
+import { DefaultChatTransport, type UIMessage } from "ai";
+import { useEffect, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { CopyButton } from "@/components/CopyButton";
+import { loadJson, saveJson, clearJson } from "@/lib/persist";
+
+const STORAGE_KEY = "ai-chat-ui:chat";
 
 const MODELS = [
   { id: "claude-sonnet-4-6", label: "Sonnet 4.6 (balanced)" },
@@ -82,12 +86,33 @@ export default function ChatPage() {
   const [model, setModel] = useState<string>(MODELS[0].id);
   const [systemPrompt, setSystemPrompt] = useState<string>(DEFAULT_SYSTEM);
 
-  const { messages, sendMessage, status, error, regenerate } = useChat({
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
-  });
+  const { messages, sendMessage, status, error, regenerate, stop, setMessages } =
+    useChat({
+      transport: new DefaultChatTransport({ api: "/api/chat" }),
+    });
+
+  // Rehydrate messages from localStorage on mount.
+  useEffect(() => {
+    const stored = loadJson<UIMessage[]>(STORAGE_KEY);
+    if (stored && stored.length > 0) {
+      setMessages(stored);
+    }
+    // run once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist messages whenever they change.
+  useEffect(() => {
+    saveJson(STORAGE_KEY, messages);
+  }, [messages]);
 
   const isLoading = status === "submitted" || status === "streaming";
   const currentModel = MODELS.find((m) => m.id === model) ?? MODELS[0];
+
+  function handleClear() {
+    setMessages([]);
+    clearJson(STORAGE_KEY);
+  }
 
   return (
     <div className="mx-auto flex h-dvh w-full max-w-2xl flex-col p-4">
@@ -106,7 +131,7 @@ export default function ChatPage() {
 
       <details className="mb-3 rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40">
         <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-zinc-600 dark:text-zinc-400">
-          ⚙️ Config (model · system prompt)
+          ⚙️ Config (model · system prompt · clear history)
         </summary>
         <div className="space-y-3 border-t border-zinc-200 px-3 py-3 dark:border-zinc-800">
           <div>
@@ -145,13 +170,24 @@ export default function ChatPage() {
               className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-2 py-1.5 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
               placeholder={DEFAULT_SYSTEM}
             />
-            <button
-              type="button"
-              onClick={() => setSystemPrompt(DEFAULT_SYSTEM)}
-              className="mt-1 text-xs text-zinc-500 underline-offset-2 hover:underline"
-            >
-              Reset to default
-            </button>
+            <div className="mt-1 flex items-center gap-3 text-xs">
+              <button
+                type="button"
+                onClick={() => setSystemPrompt(DEFAULT_SYSTEM)}
+                className="text-zinc-500 underline-offset-2 hover:underline"
+              >
+                Reset system prompt
+              </button>
+              <span className="text-zinc-300 dark:text-zinc-700">·</span>
+              <button
+                type="button"
+                onClick={handleClear}
+                disabled={messages.length === 0}
+                className="text-red-600 underline-offset-2 hover:underline disabled:text-zinc-300 dark:text-red-400 dark:disabled:text-zinc-700"
+              >
+                🗑️ Clear chat history
+              </button>
+            </div>
           </div>
         </div>
       </details>
@@ -183,13 +219,17 @@ export default function ChatPage() {
           }
 
           return (
-            <div
-              key={m.id}
-              className="max-w-[85%] rounded-2xl bg-zinc-100 px-4 py-3 text-sm text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
-            >
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                {text}
-              </ReactMarkdown>
+            <div key={m.id} className="group max-w-[85%] space-y-1">
+              <div className="rounded-2xl bg-zinc-100 px-4 py-3 text-sm text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                  {text}
+                </ReactMarkdown>
+              </div>
+              {text && (
+                <div className="opacity-0 transition-opacity group-hover:opacity-100">
+                  <CopyButton text={text} />
+                </div>
+              )}
             </div>
           );
         })}
@@ -232,13 +272,23 @@ export default function ChatPage() {
           className="flex-1 rounded-xl border border-zinc-300 bg-white px-4 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
           disabled={isLoading}
         />
-        <button
-          type="submit"
-          disabled={isLoading || !input.trim()}
-          className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
-        >
-          Send
-        </button>
+        {isLoading ? (
+          <button
+            type="button"
+            onClick={() => stop()}
+            className="rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+          >
+            Stop
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!input.trim()}
+            className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
+          >
+            Send
+          </button>
+        )}
       </form>
     </div>
   );

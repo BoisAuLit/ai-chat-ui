@@ -1,11 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { DefaultChatTransport, type UIMessage } from "ai";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { CopyButton } from "@/components/CopyButton";
+import { loadJson, saveJson, clearJson } from "@/lib/persist";
+
+const STORAGE_KEY = "ai-chat-ui:agent";
 
 const markdownComponents: Components = {
   p: ({ children }) => <p className="mb-2 leading-relaxed">{children}</p>,
@@ -104,10 +108,28 @@ function ToolCallBlock({ part }: { part: ToolPartLike }) {
 
 export default function AgentPage() {
   const [input, setInput] = useState("");
-  const { messages, sendMessage, status, error, regenerate } = useChat({
-    transport: new DefaultChatTransport({ api: "/api/agent" }),
-  });
+  const { messages, sendMessage, status, error, regenerate, stop, setMessages } =
+    useChat({
+      transport: new DefaultChatTransport({ api: "/api/agent" }),
+    });
   const isLoading = status === "submitted" || status === "streaming";
+
+  // Rehydrate from localStorage on mount
+  useEffect(() => {
+    const stored = loadJson<UIMessage[]>(STORAGE_KEY);
+    if (stored && stored.length > 0) setMessages(stored);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist
+  useEffect(() => {
+    saveJson(STORAGE_KEY, messages);
+  }, [messages]);
+
+  function handleClear() {
+    setMessages([]);
+    clearJson(STORAGE_KEY);
+  }
 
   return (
     <div className="mx-auto flex h-dvh w-full max-w-3xl flex-col p-4">
@@ -139,6 +161,17 @@ export default function AgentPage() {
             <code className="font-mono">search_indexed_doc</code> — query the most recently indexed doc from{" "}
             <Link href="/rag" className="underline">/rag</Link>
           </div>
+          {messages.length > 0 && (
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={handleClear}
+                className="text-xs text-red-600 underline-offset-2 hover:underline dark:text-red-400"
+              >
+                🗑️ Clear chat history
+              </button>
+            </div>
+          )}
         </div>
       </details>
 
@@ -177,8 +210,13 @@ export default function AgentPage() {
             );
           }
 
+          const assistantText = m.parts
+            .filter((p): p is { type: "text"; text: string } => p.type === "text")
+            .map((p) => p.text)
+            .join("");
+
           return (
-            <div key={m.id} className="space-y-2">
+            <div key={m.id} className="group space-y-2">
               {m.parts.map((part, i) => {
                 if (part.type === "text") {
                   return (
@@ -201,6 +239,11 @@ export default function AgentPage() {
                 }
                 return null;
               })}
+              {assistantText && (
+                <div className="opacity-0 transition-opacity group-hover:opacity-100">
+                  <CopyButton text={assistantText} />
+                </div>
+              )}
             </div>
           );
         })}
@@ -240,13 +283,23 @@ export default function AgentPage() {
           className="flex-1 rounded-xl border border-zinc-300 bg-white px-4 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
           disabled={isLoading}
         />
-        <button
-          type="submit"
-          disabled={isLoading || !input.trim()}
-          className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
-        >
-          Send
-        </button>
+        {isLoading ? (
+          <button
+            type="button"
+            onClick={() => stop()}
+            className="rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+          >
+            Stop
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!input.trim()}
+            className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
+          >
+            Send
+          </button>
+        )}
       </form>
     </div>
   );

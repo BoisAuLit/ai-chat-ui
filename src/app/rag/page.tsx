@@ -1,9 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { CopyButton } from "@/components/CopyButton";
+import { loadJson, saveJson, clearJson } from "@/lib/persist";
+
+const STORAGE_KEY_MESSAGES = "ai-chat-ui:rag-messages";
+const STORAGE_KEY_DOC = "ai-chat-ui:rag-doc";
 
 interface RetrievedSnippet {
   index: number;
@@ -70,18 +75,15 @@ const markdownComponents: Components = {
   ),
 };
 
-const SAMPLE_DOC = `Paste any plaintext document here — README, blog post, transcript, paper.
+const SAMPLE_DOC = `Paste any plaintext document here — README, blog post, transcript, paper — or upload a PDF (button above).
 
-It will be chunked (paragraph-aware), embedded with OpenAI text-embedding-3-small, and stored in memory. Each chat turn embeds your query, retrieves the top-4 most similar chunks via cosine similarity, and feeds them to Claude as grounded context.
-
-Try uploading the project README, a HN comment thread, or any reasonably structured doc and ask questions about it.`;
+It will be chunked (paragraph-aware), embedded with OpenAI text-embedding-3-small, and stored in memory. Each chat turn embeds your query, retrieves the top-4 most similar chunks via cosine similarity, and feeds them to Claude as grounded context.`;
 
 function scoreColor(score: number): string {
   if (score >= 0.8) return "text-emerald-700 dark:text-emerald-400";
   if (score >= 0.5) return "text-amber-700 dark:text-amber-400";
   return "text-red-700 dark:text-red-400";
 }
-
 function scoreBg(score: number): string {
   if (score >= 0.8) return "bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-900";
   if (score >= 0.5) return "bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-900";
@@ -94,13 +96,65 @@ export default function RagPage() {
   const [indexing, setIndexing] = useState(false);
   const [indexErr, setIndexErr] = useState("");
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pdfUploading, setPdfUploading] = useState(false);
+  const [pdfErr, setPdfErr] = useState("");
+
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [chatErr, setChatErr] = useState("");
 
+  const abortRef = useRef<AbortController | null>(null);
+  const [rehydrated, setRehydrated] = useState(false);
+
+  // Rehydrate from localStorage once
+  useEffect(() => {
+    const storedDoc = loadJson<{ docText: string; indexed: IndexResult | null }>(STORAGE_KEY_DOC);
+    if (storedDoc) {
+      setDocText(storedDoc.docText || "");
+      // Don't trust the indexed state across cold starts — re-indexing is required
+      // because the server-side store is in-memory.
+      setIndexed(null);
+    }
+    const storedMsgs = loadJson<ChatMsg[]>(STORAGE_KEY_MESSAGES);
+    if (storedMsgs && storedMsgs.length > 0) {
+      // Reset any stale "running" flags
+      setMessages(storedMsgs.map((m) => ({ ...m, evalRunning: false })));
+    }
+    setRehydrated(true);
+  }, []);
+
+  // Persist
+  useEffect(() => {
+    if (!rehydrated) return;
+    saveJson(STORAGE_KEY_DOC, { docText, indexed });
+  }, [docText, indexed, rehydrated]);
+
+  useEffect(() => {
+    if (!rehydrated) return;
+    saveJson(STORAGE_KEY_MESSAGES, messages);
+  }, [messages, rehydrated]);
+
   function updateMsg(id: string, patch: Partial<ChatMsg>) {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  }
+
+  async function handlePdfUpload(file: File) {
+    setPdfUploading(true);
+    setPdfErr("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/rag/extract-pdf", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `extract failed (${res.status})`);
+      setDocText(data.text);
+    } catch (e) {
+      setPdfErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPdfUploading(false);
+    }
   }
 
   async function handleIndex() {
@@ -134,8 +188,10 @@ export default function RagPage() {
     setStreaming(true);
     setChatErr("");
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      // Build the message history payload for the API (everything up to and including userMsg).
       const apiMessages = baseMessages
         .filter((m) => m.id !== assistantMsg.id)
         .map((m) => ({
@@ -151,6 +207,7 @@ export default function RagPage() {
           docHash: indexed.hash,
           messages: apiMessages,
         }),
+        signal: controller.signal,
       });
 
       if (!res.ok || !res.body) {
@@ -164,7 +221,7 @@ export default function RagPage() {
           const parsed: RetrievedSnippet[] = JSON.parse(decodeURIComponent(ragHeader));
           updateMsg(assistantMsg.id, { retrievedChunks: parsed });
         } catch {
-          /* ignore parse errors */
+          /* ignore */
         }
       }
 
@@ -178,10 +235,24 @@ export default function RagPage() {
         updateMsg(assistantMsg.id, { text: accumulated });
       }
     } catch (e) {
-      setChatErr(e instanceof Error ? e.message : String(e));
+      if ((e as { name?: string })?.name === "AbortError") {
+        // user-initiated stop; keep what we have, just mark as ended
+      } else {
+        setChatErr(e instanceof Error ? e.message : String(e));
+      }
     } finally {
+      abortRef.current = null;
       setStreaming(false);
     }
+  }
+
+  function handleStop() {
+    abortRef.current?.abort();
+  }
+
+  function handleClearChat() {
+    setMessages([]);
+    clearJson(STORAGE_KEY_MESSAGES);
   }
 
   async function handleRunEval(assistantId: string) {
@@ -231,7 +302,7 @@ export default function RagPage() {
         <div>
           <h1 className="text-lg font-semibold">ai-chat-ui · RAG + Evals</h1>
           <p className="text-xs text-zinc-500">
-            Paste doc → index → ask → run LLM-as-judge eval. OpenAI embeddings · Claude generation.
+            Paste doc or upload PDF → index → ask → run LLM-as-judge eval.
           </p>
         </div>
         <nav className="flex gap-3 text-xs text-zinc-500">
@@ -245,13 +316,37 @@ export default function RagPage() {
           📄 Document {indexed ? `· ${indexed.n_chunks} chunks indexed (hash ${indexed.hash})` : "(not indexed yet)"}
         </summary>
         <div className="space-y-2 border-t border-zinc-200 px-3 py-3 dark:border-zinc-800">
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/pdf,.pdf"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handlePdfUpload(f);
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={pdfUploading || indexing || streaming}
+              className="rounded-lg border border-zinc-300 px-2 py-1 text-xs font-medium hover:bg-white disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            >
+              {pdfUploading ? "Extracting PDF..." : "📎 Upload PDF"}
+            </button>
+            {pdfErr && (
+              <span className="text-xs text-red-600 dark:text-red-400">{pdfErr}</span>
+            )}
+          </div>
           <textarea
             value={docText}
             onChange={(e) => setDocText(e.target.value)}
             placeholder={SAMPLE_DOC}
             rows={8}
             className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-2 py-1.5 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
-            disabled={indexing || streaming}
+            disabled={indexing || streaming || pdfUploading}
           />
           <div className="flex items-center gap-3">
             <button
@@ -268,6 +363,15 @@ export default function RagPage() {
                 {indexed.cached && "· cached"}
               </span>
             )}
+            {messages.length > 0 && (
+              <button
+                type="button"
+                onClick={handleClearChat}
+                className="ml-auto text-xs text-red-600 underline-offset-2 hover:underline dark:text-red-400"
+              >
+                🗑️ Clear chat
+              </button>
+            )}
           </div>
           {indexErr && (
             <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
@@ -278,7 +382,19 @@ export default function RagPage() {
       </details>
 
       <div className="flex-1 space-y-3 overflow-y-auto pb-4">
-        {!indexed && <p className="text-sm text-zinc-500">Index a document first.</p>}
+        {!indexed && (
+          <p className="text-sm text-zinc-500">
+            Index a document first.
+            {docText && (
+              <>
+                {" "}
+                <span className="text-zinc-400">
+                  (Doc text restored from your last session — re-index to use it.)
+                </span>
+              </>
+            )}
+          </p>
+        )}
         {indexed && messages.length === 0 && (
           <p className="text-sm text-zinc-500">
             Ready. Try: <em>&quot;Summarize the key points in 3 bullets&quot;</em>
@@ -304,7 +420,7 @@ export default function RagPage() {
             !streaming;
 
           return (
-            <div key={m.id} className="space-y-2">
+            <div key={m.id} className="group space-y-2">
               <div className="max-w-[85%] rounded-2xl bg-zinc-100 px-4 py-3 text-sm text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100">
                 {m.text ? (
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
@@ -314,6 +430,11 @@ export default function RagPage() {
                   <span className="text-zinc-500">…</span>
                 )}
               </div>
+              {m.text && (
+                <div className="opacity-0 transition-opacity group-hover:opacity-100">
+                  <CopyButton text={m.text} />
+                </div>
+              )}
 
               {m.retrievedChunks && m.retrievedChunks.length > 0 && (
                 <details className="ml-0 max-w-[85%] rounded-xl border border-zinc-200 bg-zinc-50 text-xs dark:border-zinc-800 dark:bg-zinc-900/40">
@@ -414,13 +535,23 @@ export default function RagPage() {
           className="flex-1 rounded-xl border border-zinc-300 bg-white px-4 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
           disabled={!indexed || streaming}
         />
-        <button
-          type="submit"
-          disabled={!indexed || streaming || !input.trim()}
-          className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
-        >
-          {streaming ? "..." : "Send"}
-        </button>
+        {streaming ? (
+          <button
+            type="button"
+            onClick={handleStop}
+            className="rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+          >
+            Stop
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!indexed || !input.trim()}
+            className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
+          >
+            Send
+          </button>
+        )}
       </form>
     </div>
   );
