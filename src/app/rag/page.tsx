@@ -8,12 +8,21 @@ import { CopyButton } from "@/components/CopyButton";
 import { loadJson, saveJson, clearJson } from "@/lib/persist";
 
 const STORAGE_KEY_MESSAGES = "ai-chat-ui:rag-messages";
-const STORAGE_KEY_DOC = "ai-chat-ui:rag-doc";
+const STORAGE_KEY_DRAFT = "ai-chat-ui:rag-draft";
+
+interface DocSummary {
+  hash: string;
+  n_chunks: number;
+  n_chars: number;
+  indexed_at: string;
+  snippet: string;
+}
 
 interface RetrievedSnippet {
   index: number;
   score: number;
   snippet: string;
+  doc_hash?: string;
 }
 
 interface EvalDetails {
@@ -27,9 +36,7 @@ interface EvalDetails {
     n_relevant: number;
     rationale: string;
   };
-  answer_relevance: {
-    rationale: string;
-  };
+  answer_relevance: { rationale: string };
 }
 
 interface EvalResult {
@@ -47,13 +54,6 @@ interface ChatMsg {
   evalResult?: EvalResult;
   evalRunning?: boolean;
   evalError?: string;
-}
-
-interface IndexResult {
-  hash: string;
-  n_chunks: number;
-  n_chars: number;
-  cached: boolean;
 }
 
 const markdownComponents: Components = {
@@ -77,7 +77,7 @@ const markdownComponents: Components = {
 
 const SAMPLE_DOC = `Paste any plaintext document here — README, blog post, transcript, paper — or upload a PDF (button above).
 
-It will be chunked (paragraph-aware), embedded with OpenAI text-embedding-3-small, and stored in memory. Each chat turn embeds your query, retrieves the top-4 most similar chunks via cosine similarity, and feeds them to Claude as grounded context.`;
+Index multiple docs and the chat will retrieve across ALL of them; the response shows which chunk came from which document.`;
 
 function scoreColor(score: number): string {
   if (score >= 0.8) return "text-emerald-700 dark:text-emerald-400";
@@ -91,8 +91,9 @@ function scoreBg(score: number): string {
 }
 
 export default function RagPage() {
-  const [docText, setDocText] = useState("");
-  const [indexed, setIndexed] = useState<IndexResult | null>(null);
+  const [docs, setDocs] = useState<DocSummary[]>([]);
+  const [activeHashes, setActiveHashes] = useState<Set<string>>(new Set());
+  const [draftText, setDraftText] = useState("");
   const [indexing, setIndexing] = useState(false);
   const [indexErr, setIndexErr] = useState("");
 
@@ -108,28 +109,43 @@ export default function RagPage() {
   const abortRef = useRef<AbortController | null>(null);
   const [rehydrated, setRehydrated] = useState(false);
 
-  // Rehydrate from localStorage once
-  useEffect(() => {
-    const storedDoc = loadJson<{ docText: string; indexed: IndexResult | null }>(STORAGE_KEY_DOC);
-    if (storedDoc) {
-      setDocText(storedDoc.docText || "");
-      // Don't trust the indexed state across cold starts — re-indexing is required
-      // because the server-side store is in-memory.
-      setIndexed(null);
+  async function fetchDocs() {
+    try {
+      const res = await fetch("/api/rag/list");
+      if (!res.ok) return;
+      const data: { docs: DocSummary[] } = await res.json();
+      setDocs(data.docs);
+      setActiveHashes((prev) => {
+        // Keep previous selections that still exist; auto-add any new docs.
+        const next = new Set(prev);
+        for (const d of data.docs) if (!next.has(d.hash)) next.add(d.hash);
+        for (const h of [...next]) {
+          if (!data.docs.some((d) => d.hash === h)) next.delete(h);
+        }
+        return next;
+      });
+    } catch {
+      /* ignore — server might be cold */
     }
+  }
+
+  // Rehydrate from localStorage + fetch server doc list once.
+  useEffect(() => {
+    const storedDraft = loadJson<string>(STORAGE_KEY_DRAFT);
+    if (storedDraft) setDraftText(storedDraft);
+
     const storedMsgs = loadJson<ChatMsg[]>(STORAGE_KEY_MESSAGES);
     if (storedMsgs && storedMsgs.length > 0) {
-      // Reset any stale "running" flags
       setMessages(storedMsgs.map((m) => ({ ...m, evalRunning: false })));
     }
+    fetchDocs();
     setRehydrated(true);
   }, []);
 
-  // Persist
   useEffect(() => {
     if (!rehydrated) return;
-    saveJson(STORAGE_KEY_DOC, { docText, indexed });
-  }, [docText, indexed, rehydrated]);
+    saveJson(STORAGE_KEY_DRAFT, draftText);
+  }, [draftText, rehydrated]);
 
   useEffect(() => {
     if (!rehydrated) return;
@@ -138,6 +154,15 @@ export default function RagPage() {
 
   function updateMsg(id: string, patch: Partial<ChatMsg>) {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  }
+
+  function toggleHash(hash: string) {
+    setActiveHashes((prev) => {
+      const next = new Set(prev);
+      if (next.has(hash)) next.delete(hash);
+      else next.add(hash);
+      return next;
+    });
   }
 
   async function handlePdfUpload(file: File) {
@@ -149,7 +174,7 @@ export default function RagPage() {
       const res = await fetch("/api/rag/extract-pdf", { method: "POST", body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `extract failed (${res.status})`);
-      setDocText(data.text);
+      setDraftText(data.text);
     } catch (e) {
       setPdfErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -158,19 +183,25 @@ export default function RagPage() {
   }
 
   async function handleIndex() {
-    if (!docText.trim() || indexing) return;
+    if (!draftText.trim() || indexing) return;
     setIndexing(true);
     setIndexErr("");
     try {
       const res = await fetch("/api/rag/index", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: docText }),
+        body: JSON.stringify({ text: draftText }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `index failed (${res.status})`);
-      setIndexed(data as IndexResult);
-      setMessages([]);
+      // Refresh full list (server is the source of truth).
+      await fetchDocs();
+      // Make sure the freshly-indexed doc is active.
+      if (data.hash) {
+        setActiveHashes((prev) => new Set(prev).add(data.hash));
+      }
+      // Clear the draft so the user can paste another doc.
+      setDraftText("");
     } catch (e) {
       setIndexErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -178,8 +209,19 @@ export default function RagPage() {
     }
   }
 
+  async function handleClearAllDocs() {
+    if (!confirm("Forget all indexed documents on the server? This cannot be undone.")) return;
+    try {
+      await fetch("/api/rag/clear", { method: "POST" });
+    } catch {
+      /* ignore */
+    }
+    setDocs([]);
+    setActiveHashes(new Set());
+  }
+
   async function handleSend() {
-    if (!input.trim() || streaming || !indexed) return;
+    if (!input.trim() || streaming || activeHashes.size === 0) return;
     const userMsg: ChatMsg = { id: crypto.randomUUID(), role: "user", text: input };
     const assistantMsg: ChatMsg = { id: crypto.randomUUID(), role: "assistant", text: "" };
     const baseMessages = [...messages, userMsg, assistantMsg];
@@ -204,7 +246,7 @@ export default function RagPage() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          docHash: indexed.hash,
+          docHashes: [...activeHashes],
           messages: apiMessages,
         }),
         signal: controller.signal,
@@ -235,9 +277,7 @@ export default function RagPage() {
         updateMsg(assistantMsg.id, { text: accumulated });
       }
     } catch (e) {
-      if ((e as { name?: string })?.name === "AbortError") {
-        // user-initiated stop; keep what we have, just mark as ended
-      } else {
+      if ((e as { name?: string })?.name !== "AbortError") {
         setChatErr(e instanceof Error ? e.message : String(e));
       }
     } finally {
@@ -296,13 +336,16 @@ export default function RagPage() {
     }
   }
 
+  const activeDocs = docs.filter((d) => activeHashes.has(d.hash));
+  const canChat = activeDocs.length > 0;
+
   return (
     <div className="mx-auto flex h-dvh w-full max-w-3xl flex-col p-4">
       <header className="mb-3 flex items-center justify-between border-b border-zinc-200 pb-3 dark:border-zinc-800">
         <div>
           <h1 className="text-lg font-semibold">ai-chat-ui · RAG + Evals</h1>
           <p className="text-xs text-zinc-500">
-            Paste doc or upload PDF → index → ask → run LLM-as-judge eval.
+            Multi-doc retrieval. Index several docs, query across all of them, run LLM-as-judge evals.
           </p>
         </div>
         <nav className="flex gap-3 text-xs text-zinc-500">
@@ -311,93 +354,139 @@ export default function RagPage() {
         </nav>
       </header>
 
-      <details className="mb-3 rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40" open={!indexed}>
+      <details className="mb-3 rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40" open={docs.length === 0}>
         <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-zinc-600 dark:text-zinc-400">
-          📄 Document {indexed ? `· ${indexed.n_chunks} chunks indexed (hash ${indexed.hash})` : "(not indexed yet)"}
+          📚 Indexed documents · {docs.length} doc{docs.length === 1 ? "" : "s"} · {activeDocs.length} active{" "}
+          {docs.length > 0 && (
+            <span className="text-zinc-400">
+              ({docs.reduce((a, d) => a + d.n_chunks, 0)} chunks total)
+            </span>
+          )}
         </summary>
-        <div className="space-y-2 border-t border-zinc-200 px-3 py-3 dark:border-zinc-800">
-          <div className="flex items-center gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/pdf,.pdf"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) handlePdfUpload(f);
-                e.target.value = "";
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={pdfUploading || indexing || streaming}
-              className="rounded-lg border border-zinc-300 px-2 py-1 text-xs font-medium hover:bg-white disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-800"
-            >
-              {pdfUploading ? "Extracting PDF..." : "📎 Upload PDF"}
-            </button>
-            {pdfErr && (
-              <span className="text-xs text-red-600 dark:text-red-400">{pdfErr}</span>
-            )}
-          </div>
-          <textarea
-            value={docText}
-            onChange={(e) => setDocText(e.target.value)}
-            placeholder={SAMPLE_DOC}
-            rows={8}
-            className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-2 py-1.5 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
-            disabled={indexing || streaming || pdfUploading}
-          />
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={handleIndex}
-              disabled={!docText.trim() || indexing || streaming}
-              className="rounded-lg bg-zinc-900 px-4 py-1.5 text-xs font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
-            >
-              {indexing ? "Indexing..." : indexed ? "Re-index" : "Index document"}
-            </button>
-            {indexed && (
-              <span className="text-xs text-zinc-500">
-                {indexed.n_chars.toLocaleString()} chars · {indexed.n_chunks} chunks{" "}
-                {indexed.cached && "· cached"}
-              </span>
-            )}
-            {messages.length > 0 && (
+        <div className="space-y-3 border-t border-zinc-200 px-3 py-3 dark:border-zinc-800">
+          {docs.length > 0 && (
+            <div className="space-y-2">
+              {docs.map((d) => {
+                const active = activeHashes.has(d.hash);
+                return (
+                  <label
+                    key={d.hash}
+                    className={
+                      "flex cursor-pointer items-start gap-3 rounded-lg border p-2 transition-colors " +
+                      (active
+                        ? "border-emerald-300 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/40"
+                        : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950")
+                    }
+                  >
+                    <input
+                      type="checkbox"
+                      checked={active}
+                      onChange={() => toggleHash(d.hash)}
+                      className="mt-0.5"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                        <code className="font-mono text-zinc-700 dark:text-zinc-300">{d.hash}</code>
+                        <span>·</span>
+                        <span>{d.n_chunks} chunks</span>
+                        <span>·</span>
+                        <span>{d.n_chars.toLocaleString()} chars</span>
+                      </div>
+                      <div className="mt-1 truncate text-xs text-zinc-600 dark:text-zinc-400">
+                        {d.snippet}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
               <button
                 type="button"
-                onClick={handleClearChat}
-                className="ml-auto text-xs text-red-600 underline-offset-2 hover:underline dark:text-red-400"
+                onClick={handleClearAllDocs}
+                className="text-xs text-red-600 underline-offset-2 hover:underline dark:text-red-400"
               >
-                🗑️ Clear chat
+                🗑️ Forget all indexed docs
               </button>
-            )}
-          </div>
-          {indexErr && (
-            <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
-              {indexErr}
             </div>
           )}
+
+          <div className="rounded-lg border border-dashed border-zinc-300 p-3 dark:border-zinc-700">
+            <div className="mb-2 text-xs font-medium text-zinc-600 dark:text-zinc-400">
+              {docs.length === 0 ? "Index your first document" : "Add another document"}
+            </div>
+            <div className="mb-2 flex items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf,.pdf"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handlePdfUpload(f);
+                  e.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={pdfUploading || indexing || streaming}
+                className="rounded-lg border border-zinc-300 px-2 py-1 text-xs font-medium hover:bg-white disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-800"
+              >
+                {pdfUploading ? "Extracting PDF..." : "📎 Upload PDF"}
+              </button>
+              {pdfErr && (
+                <span className="text-xs text-red-600 dark:text-red-400">{pdfErr}</span>
+              )}
+            </div>
+            <textarea
+              value={draftText}
+              onChange={(e) => setDraftText(e.target.value)}
+              placeholder={SAMPLE_DOC}
+              rows={6}
+              className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-2 py-1.5 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900"
+              disabled={indexing || streaming || pdfUploading}
+            />
+            <div className="mt-2 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleIndex}
+                disabled={!draftText.trim() || indexing || streaming}
+                className="rounded-lg bg-zinc-900 px-4 py-1.5 text-xs font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
+              >
+                {indexing ? "Indexing..." : "Index document"}
+              </button>
+              {messages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearChat}
+                  className="ml-auto text-xs text-red-600 underline-offset-2 hover:underline dark:text-red-400"
+                >
+                  🗑️ Clear chat
+                </button>
+              )}
+            </div>
+            {indexErr && (
+              <div className="mt-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+                {indexErr}
+              </div>
+            )}
+          </div>
         </div>
       </details>
 
       <div className="flex-1 space-y-3 overflow-y-auto pb-4">
-        {!indexed && (
+        {docs.length === 0 && (
           <p className="text-sm text-zinc-500">
-            Index a document first.
-            {docText && (
-              <>
-                {" "}
-                <span className="text-zinc-400">
-                  (Doc text restored from your last session — re-index to use it.)
-                </span>
-              </>
-            )}
+            Index a document to start. Multiple docs are supported — the chat will retrieve across all active (checked) docs.
           </p>
         )}
-        {indexed && messages.length === 0 && (
+        {docs.length > 0 && !canChat && (
+          <p className="text-sm text-amber-700 dark:text-amber-400">
+            ⚠️ No active docs selected. Tick at least one document above before chatting.
+          </p>
+        )}
+        {canChat && messages.length === 0 && (
           <p className="text-sm text-zinc-500">
-            Ready. Try: <em>&quot;Summarize the key points in 3 bullets&quot;</em>
+            Ready. Querying across {activeDocs.length} doc{activeDocs.length === 1 ? "" : "s"}. Try: <em>&quot;Summarize the key points in 3 bullets&quot;</em>
           </p>
         )}
 
@@ -413,11 +502,8 @@ export default function RagPage() {
             );
           }
 
-          const canEval =
-            !!m.retrievedChunks &&
-            m.retrievedChunks.length > 0 &&
-            !!m.text &&
-            !streaming;
+          const canEval = !!m.retrievedChunks && m.retrievedChunks.length > 0 && !!m.text && !streaming;
+          const uniqueSrcDocs = new Set((m.retrievedChunks || []).map((r) => r.doc_hash).filter(Boolean));
 
           return (
             <div key={m.id} className="group space-y-2">
@@ -440,12 +526,21 @@ export default function RagPage() {
                 <details className="ml-0 max-w-[85%] rounded-xl border border-zinc-200 bg-zinc-50 text-xs dark:border-zinc-800 dark:bg-zinc-900/40">
                   <summary className="cursor-pointer select-none px-3 py-2 font-medium text-zinc-600 dark:text-zinc-400">
                     🔍 Retrieved {m.retrievedChunks.length} chunks
+                    {uniqueSrcDocs.size > 1 && (
+                      <span className="ml-2 text-zinc-500">from {uniqueSrcDocs.size} docs</span>
+                    )}
                   </summary>
                   <div className="space-y-2 border-t border-zinc-200 px-3 py-3 dark:border-zinc-800">
-                    {m.retrievedChunks.map((r) => (
-                      <div key={r.index} className="rounded-lg border border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
-                        <div className="mb-1 flex items-center gap-2 text-zinc-500">
+                    {m.retrievedChunks.map((r, i) => (
+                      <div key={i} className="rounded-lg border border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
+                        <div className="mb-1 flex flex-wrap items-center gap-2 text-zinc-500">
                           <code>chunk {r.index}</code>
+                          {r.doc_hash && (
+                            <>
+                              <span>·</span>
+                              <span>doc <code className="font-mono">{r.doc_hash.slice(0, 8)}</code></span>
+                            </>
+                          )}
                           <span>·</span>
                           <span>score {r.score.toFixed(3)}</span>
                         </div>
@@ -489,13 +584,11 @@ export default function RagPage() {
                     </summary>
                     <div className="space-y-2 border-t border-zinc-200 px-3 py-3 text-[11px] dark:border-zinc-800">
                       <div>
-                        <strong>Faithfulness</strong> — {m.evalResult.details.faithfulness.n_supported}/{m.evalResult.details.faithfulness.n_claims} claims supported by retrieved chunks.
+                        <strong>Faithfulness</strong> — {m.evalResult.details.faithfulness.n_supported}/{m.evalResult.details.faithfulness.n_claims} claims supported.
                         {m.evalResult.details.faithfulness.unsupported_examples.length > 0 && (
                           <ul className="mt-1 list-disc space-y-0.5 pl-5 text-zinc-600 dark:text-zinc-400">
                             {m.evalResult.details.faithfulness.unsupported_examples.map((q, i) => (
-                              <li key={i}>
-                                <em>&quot;{q}&quot;</em> — not in chunks
-                              </li>
+                              <li key={i}><em>&quot;{q}&quot;</em></li>
                             ))}
                           </ul>
                         )}
@@ -531,9 +624,15 @@ export default function RagPage() {
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={indexed ? "Ask about the indexed document..." : "Index a document first"}
+          placeholder={
+            !canChat
+              ? "Index and select at least one document first"
+              : activeDocs.length === 1
+              ? "Ask about the indexed document..."
+              : `Ask across ${activeDocs.length} documents...`
+          }
           className="flex-1 rounded-xl border border-zinc-300 bg-white px-4 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
-          disabled={!indexed || streaming}
+          disabled={!canChat || streaming}
         />
         {streaming ? (
           <button
@@ -546,7 +645,7 @@ export default function RagPage() {
         ) : (
           <button
             type="submit"
-            disabled={!indexed || !input.trim()}
+            disabled={!canChat || !input.trim()}
             className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
           >
             Send

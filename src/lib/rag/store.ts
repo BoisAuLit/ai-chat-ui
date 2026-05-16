@@ -40,3 +40,37 @@ export function hasDoc(hash: string): boolean {
 export function listDocHashes(): string[] {
   return [...STORE.keys()];
 }
+
+export interface DocSummary {
+  hash: string;
+  n_chunks: number;
+  n_chars: number;
+  indexed_at: string;
+  snippet: string;
+}
+
+export function listDocSummaries(): DocSummary[] {
+  return [...STORE.values()].map((d) => ({
+    hash: d.hash,
+    n_chunks: d.chunks.length,
+    n_chars: d.n_chars,
+    indexed_at: d.indexed_at,
+    // First 200 chars of first chunk — enough to ID the doc in a list
+    snippet: (d.chunks[0] || "").slice(0, 200),
+  }));
+}
+
+export function clearAllDocs(): number {
+  const n = STORE.size;
+  STORE.clear();
+  LATEST_HASH = null;
+  return n;
+}
+
+export function getDocsOrLatest(hashes: string[]): IndexedDoc[] {
+  if (hashes.length === 0) {
+    const latest = getLatestDoc();
+    return latest ? [latest] : [];
+  }
+  return hashes.map((h) => STORE.get(h)).filter((d): d is IndexedDoc => !!d);
+}

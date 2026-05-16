@@ -23,6 +23,7 @@ export interface Retrieved {
   index: number;
   chunk: string;
   score: number;
+  doc_hash?: string; // present only in multi-doc retrieval
 }
 
 export function retrieveTopK(
@@ -35,6 +36,26 @@ export function retrieveTopK(
     chunk: doc.chunks[i],
     score: cosine(emb, queryEmbedding),
   }));
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, k);
+}
+
+export function retrieveTopKMulti(
+  docs: IndexedDoc[],
+  queryEmbedding: number[],
+  k = 4,
+): Retrieved[] {
+  const scored: Retrieved[] = [];
+  for (const doc of docs) {
+    for (let i = 0; i < doc.embeddings.length; i++) {
+      scored.push({
+        index: i,
+        chunk: doc.chunks[i],
+        score: cosine(doc.embeddings[i], queryEmbedding),
+        doc_hash: doc.hash,
+      });
+    }
+  }
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, k);
 }
