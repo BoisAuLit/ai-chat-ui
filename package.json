@@ -12,6 +12,7 @@
     "@ai-sdk/anthropic": "^3.0.77",
     "@ai-sdk/openai": "^3.0.63",
     "@ai-sdk/react": "^3.0.182",
+    "@upstash/redis": "^1.38.0",
     "ai": "^6.0.180",
     "next": "16.2.6",
     "pdfjs-dist": "^5.7.284",

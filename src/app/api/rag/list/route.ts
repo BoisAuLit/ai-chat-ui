@@ -1,5 +1,8 @@
-import { listDocSummaries } from "@/lib/rag/store";
+import { getBackend, listDocSummaries } from "@/lib/rag/store";
 
 export async function GET(): Promise<Response> {
-  return Response.json({ docs: listDocSummaries() });
+  return Response.json({
+    docs: await listDocSummaries(),
+    backend: getBackend(),
+  });
 }

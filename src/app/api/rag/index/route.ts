@@ -23,7 +23,7 @@ export async function POST(req: Request): Promise<Response> {
   const hash = hashText(text);
 
   // Idempotent: if we've already indexed this exact text, skip re-embedding.
-  const existing = getDoc(hash);
+  const existing = await getDoc(hash);
   if (existing) {
     return Response.json({
       hash,
@@ -51,7 +51,7 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  putDoc({
+  await putDoc({
     hash,
     chunks,
     embeddings,

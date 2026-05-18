@@ -52,8 +52,7 @@ Built in 5 days. Open about the trade-offs (in-memory state evicts on cold start
 
 ## Known production trade-offs
 
-- **In-memory RAG store evicts on Vercel cold start.** Documented in `/rag`: "re-index after a cold start." Real fix (Vercel KV / Upstash / Turso SQLite) is paid + deferred until a real user complains.
-- **`/api/rag/list` can disagree with `/api/rag/chat`** when Vercel routes the requests to different serverless instances. Same in-memory-state limitation. Surfaced and documented during a live production test.
+- **RAG store backend is env-var gated**: if `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are set, the store persists to Upstash Redis (survives cold starts and shared across serverless instances). Otherwise falls back to in-memory (cold-start eviction, instance-local). The store backend is reported via `GET /api/rag/list` → `backend` field. Provisioning steps: Vercel dashboard → Storage → "Marketplace database" → Upstash → create free-tier KV → copy the two env vars to project settings → redeploy. Free tier handles ~10k commands/day.
 - **Tool-use loop is capped at 8 steps** to avoid runaway loops. Adjustable in `src/app/api/agent/route.ts`.
 
 ## Local development

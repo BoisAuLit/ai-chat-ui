@@ -165,7 +165,7 @@ export const searchIndexedDocTool = tool({
     query: z.string().describe("What to search for in the indexed document."),
   }),
   execute: async ({ query }) => {
-    const doc = getLatestDoc();
+    const doc = await getLatestDoc();
     if (!doc) {
       return {
         error:

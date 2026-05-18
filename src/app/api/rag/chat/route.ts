@@ -49,7 +49,7 @@ export async function POST(req: Request): Promise<Response> {
     ? [body.docHash]
     : [];
 
-  const docs = getDocsOrLatest(requestedHashes);
+  const docs = await getDocsOrLatest(requestedHashes);
   if (docs.length === 0) {
     return Response.json(
       {
